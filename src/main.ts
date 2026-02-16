@@ -5,10 +5,10 @@ import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockCont
 const PLAYER_EYE_HEIGHT = 1.6;
 const PLAYER_RADIUS = 0.35;
 const GRAVITY = -30;
-const JUMP_SPEED = 12; // stronger jump to allow reliable vaulting onto cars
+const JUMP_SPEED = 20; // higher jump for smoother feel
 const STEP_HEIGHT = 0.45; // automatic small-step height for pavements
 const STEP_HEIGHT_CAR = 1.2; // allow climbing onto cars automatically (raised slightly)
-const BASE_PLAYER_SPEED = 6; // base running speed (increases slightly with score)
+const BASE_PLAYER_SPEED = 8; // player is faster relative to zombies
 
 // spawn limits
 const SPAWN_MIN_DISTANCE = 18; // minimum distance from player
@@ -76,6 +76,46 @@ function createCity() {
 
   // buildings in grid along both sides of roads (expanded city with randomized sparsity)
   const blockSpacing = 30;
+  
+  // create building texture (window pattern)
+  function createBuildingTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d')!;
+    
+    // base color (random concrete/brick)
+    const baseHue = 0.05 + Math.random() * 0.15;
+    const baseLightness = 0.3 + Math.random() * 0.2;
+    ctx.fillStyle = `hsl(${baseHue * 360}, 20%, ${baseLightness * 100}%)`;
+    ctx.fillRect(0, 0, 256, 256);
+    
+    // draw windows
+    ctx.fillStyle = '#1a3a5c';
+    const windowSize = 30;
+    const windowSpacing = 40;
+    for (let x = 20; x < 256; x += windowSpacing) {
+      for (let y = 20; y < 256; y += windowSpacing) {
+        ctx.fillRect(x, y, windowSize, windowSize);
+        // small window reflection
+        ctx.fillStyle = '#4a7aac';
+        ctx.fillRect(x + 5, y + 5, 8, 8);
+        ctx.fillStyle = '#1a3a5c';
+      }
+    }
+    
+    // add some grime
+    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+    for (let i = 0; i < 50; i++) {
+      ctx.fillRect(Math.random() * 256, Math.random() * 256, Math.random() * 20 + 5, Math.random() * 20 + 5);
+    }
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    return texture;
+  }
+  
   for (let gx = -5; gx <= 5; gx++) {
     for (let gz = -5; gz <= 5; gz++) {
       // leave center roads clear
@@ -87,7 +127,15 @@ function createCity() {
       const w = 8 + Math.random() * 12;
       const d = 8 + Math.random() * 12;
       const h = 6 + Math.random() * 30; // slightly lower max height to reduce overdraw
-      const bmat = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(0.6 - Math.random() * 0.1, 0.2, 0.15 + Math.random() * 0.25) });
+      
+      // use texture instead of flat color
+      const buildingTexture = createBuildingTexture();
+      const bmat = new THREE.MeshStandardMaterial({ 
+        map: buildingTexture,
+        roughness: 0.8,
+        metalness: 0.0
+      });
+      
       const building = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), bmat);
       building.position.set(worldX, h / 2, worldZ);
       addObstacle(building, false);
@@ -119,41 +167,7 @@ function createCity() {
     scene.add(head2);
   }
 
-  // cars on the road (static obstacles user can jump on)
-  const carMat = new THREE.MeshStandardMaterial({ color: 0x3366aa });
-  for (let i = 0; i < 8; i++) {
-    const car = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.0, 4.2), carMat);
-
-    // try a few positions and reject placements that overlap existing obstacles
-    let placed = false;
-    for (let attempt = 0; attempt < 12; attempt++) {
-      const laneZ = Math.random() > 0.5 ? 2.5 : -2.5;
-      const x = -160 + Math.random() * 320; // keep cars mostly in city bounds
-      car.position.set(x, 0.5, laneZ);
-      car.rotation.y = (Math.random() - 0.5) * 0.2;
-      car.updateMatrixWorld(true);
-      const carBox = new THREE.Box3().setFromObject(car);
-
-      // check overlap with any existing obstacle box
-      let overlaps = false;
-      for (const o of obstacles) {
-        if (carBox.intersectsBox(o.box)) {
-          overlaps = true;
-          break;
-        }
-      }
-      if (!overlaps) {
-        addObstacle(car, true); // safe placement
-        placed = true;
-        break;
-      }
-    }
-    if (!placed) {
-      // fallback: place anyway (rare) but keep within road center
-      car.position.set((Math.random() - 0.5) * 200, 0.5, Math.random() > 0.5 ? 2.5 : -2.5);
-      addObstacle(car, true);
-    }
-  }
+  // cars removed - platform will be created as safehouse replacement
 }
 createCity();
 
@@ -190,7 +204,12 @@ let health = 100;
 let nextMilestone = 100;
 
 function updateScore(amount: number) {
-  score += amount;
+  // apply 20% score penalty when player is on platform
+  const playerPos = controls.getObject().position;
+  const playerOnPlatform = isPlayerInSafehouse(playerPos);
+  const finalAmount = playerOnPlatform ? amount * 0.8 : amount;
+  
+  score += finalAmount;
   scoreEl.textContent = `Score: ${Math.floor(score)}`;
   while (Math.floor(score) >= nextMilestone) {
     difficultyLevel = Math.floor(Math.floor(score) / 100);
@@ -314,13 +333,24 @@ let wasOnGround = true;
 let cameraBump = 0;
 const cameraBaseY = camera.position.y;
 const recoil = new THREE.Vector3();
+let wasPlayerOnPlatform = false; // tracks if player was on platform last frame
 
 // initial stabilization (must run after velocityY is declared)
 stabilizePlayerPosition();
 resolvePlayerPenetration();
 
 // ---------- Zombies (AI + spawning + difficulty scaling) ----------
-type Zombie = { mesh: THREE.Mesh; speed: number; alive: boolean; hp: number; baseColor?: number; mutant?: boolean };
+type Zombie = { 
+  mesh: THREE.Mesh; 
+  speed: number; 
+  alive: boolean; 
+  hp: number; 
+  baseColor?: number; 
+  mutant?: boolean;
+  graceUntil?: number; // timestamp when grace period ends (zombie acts neutral until this time)
+  randomWalkDir?: THREE.Vector3; // direction for random walk during grace period
+  randomWalkTimeout?: number; // time remaining in current random walk direction
+};
 const zombies: Zombie[] = [];
 const zombieGroup = new THREE.Group();
 scene.add(zombieGroup);
@@ -336,113 +366,88 @@ let safehouseMilestone = 1000; // next score threshold for safehouse spawn/grow
 function createSafehouse(size: number) {
   // remove old safehouse if exists
   if (safehouse) scene.remove(safehouse.mesh);
+  
+  // remove old platform obstacle if exists
+  const existingPlatformIdx = obstacles.findIndex(o => (o as any).isPlatform);
+  if (existingPlatformIdx >= 0) {
+    obstacles.splice(existingPlatformIdx, 1);
+  }
 
   const group = new THREE.Group();
   group.position.set(0, 0, 0);
 
-  // hollow cube walls (no floor/ceiling inside for performance)
-  const wallThickness = 0.2;
-  const wallMat = new THREE.MeshStandardMaterial({ color: 0x8b4513 });
-  const darkMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a }); // dark interior walls
-
-  // 4 outer walls (front, back, left, right)
-  const walls = [
-    new THREE.Mesh(new THREE.BoxGeometry(size, size, wallThickness), wallMat), // front
-    new THREE.Mesh(new THREE.BoxGeometry(size, size, wallThickness), wallMat), // back
-    new THREE.Mesh(new THREE.BoxGeometry(wallThickness, size, size), wallMat), // left
-    new THREE.Mesh(new THREE.BoxGeometry(wallThickness, size, size), wallMat), // right
-  ];
-  walls[0].position.z = size / 2;
-  walls[1].position.z = -size / 2;
-  walls[2].position.x = -size / 2;
-  walls[3].position.x = size / 2;
-  walls[0].position.y = size / 2;
-  walls[1].position.y = size / 2;
-  walls[2].position.y = size / 2;
-  walls[3].position.y = size / 2;
-  walls.forEach(w => group.add(w));
-
-  // door frame and opening on front wall (left side, visible from inside)
-  const doorWidth = size * 0.25;
-  const doorHeight = size * 0.5;
-  const doorDepth = wallThickness * 0.5;
+  // create a simple grey platform with red/white striped border
+  const platformMat = new THREE.MeshStandardMaterial({ color: 0x999999 });
+  const platform = new THREE.Mesh(new THREE.BoxGeometry(size * 1.5, 0.3, size * 1.5), platformMat);
+  platform.position.set(0, 0.15, 0);
+  group.add(platform);
   
-  // door frame (visible border around opening)
-  const frameThickness = 0.15;
-  const frameTop = new THREE.Mesh(new THREE.BoxGeometry(doorWidth + frameThickness * 2, frameThickness, doorDepth), wallMat);
-  frameTop.position.set(-size * 0.15, size * 0.3 + doorHeight / 2, 0);
-  group.add(frameTop);
+  // add platform to obstacles so player can stand on it
+  platform.updateMatrixWorld(true);
+  const platformBox = new THREE.Box3().setFromObject(platform);
+  const platformObstacle: any = { 
+    mesh: platform, 
+    box: platformBox, 
+    top: platformBox.max.y, 
+    isPlatform: true 
+  };
+  obstacles.push(platformObstacle);
 
-  const doorLeft = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, doorHeight + frameThickness * 2, doorDepth), wallMat);
-  doorLeft.position.set(-size * 0.15 - doorWidth / 2 - frameThickness / 2, size * 0.3, 0);
-  group.add(doorLeft);
+  // red and white striped border around platform perimeter
+  const borderHeight = 0.15;
+  const borderThickness = 0.2;
+  const redMat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+  const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+  const platformHalfSizeX = (size * 1.5) / 2;
+  const platformHalfSizeZ = (size * 1.5) / 2;
+  const stripeWidth = 0.5;
+  const stripePairs = Math.floor((platformHalfSizeX * 2) / stripeWidth);
 
-  const doorRight = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, doorHeight + frameThickness * 2, doorDepth), wallMat);
-  doorRight.position.set(-size * 0.15 + doorWidth / 2 + frameThickness / 2, size * 0.3, 0);
-  group.add(doorRight);
+  // front and back borders with alternating red/white stripes
+  for (let i = 0; i < stripePairs; i++) {
+    const xPos = -platformHalfSizeX + i * stripeWidth;
+    const isFront = i % 2 === 0;
+    const mat = isFront ? redMat : whiteMat;
 
-  const doorBottom = new THREE.Mesh(new THREE.BoxGeometry(doorWidth + frameThickness * 2, frameThickness, doorDepth), wallMat);
-  doorBottom.position.set(-size * 0.15, size * 0.3 - doorHeight / 2, 0);
-  group.add(doorBottom);
+    // front border
+    const frontBorder = new THREE.Mesh(new THREE.BoxGeometry(stripeWidth, borderHeight, borderThickness), mat);
+    frontBorder.position.set(xPos, 0.2, platformHalfSizeZ);
+    group.add(frontBorder);
 
-  // windows: place INSIDE the safehouse walls at head level (visible from inside)
-  const windowSize = size * 0.22; // larger windows
-  const windowSpacing = size / 2.2;
-  const windowPositions: THREE.Vector3[] = [];
-  const windowMat = new THREE.MeshStandardMaterial({ color: 0x4da6ff, emissive: 0x1a5c99, transparent: true, opacity: 0.7 });
-
-  // front wall windows (deep inside, looking out to zombies)
-  for (let i = -1; i <= 1; i++) {
-    const wx = i * windowSpacing;
-    const wy = 1.6;
-    const wz = (size / 2) - 1.5; // much deeper inside the front wall
-    const window = new THREE.Mesh(new THREE.BoxGeometry(windowSize, windowSize, 0.1), windowMat);
-    window.position.set(wx, wy, wz);
-    group.add(window);
-    windowPositions.push(new THREE.Vector3(wx, wy, wz));
+    // back border
+    const backBorder = new THREE.Mesh(new THREE.BoxGeometry(stripeWidth, borderHeight, borderThickness), mat);
+    backBorder.position.set(xPos, 0.2, -platformHalfSizeZ);
+    group.add(backBorder);
   }
 
-  // back wall windows (deep inside)
-  for (let i = -1; i <= 1; i++) {
-    const wx = i * windowSpacing;
-    const wy = 1.6;
-    const wz = -(size / 2) + 1.5; // much deeper inside the back wall
-    const window = new THREE.Mesh(new THREE.BoxGeometry(windowSize, windowSize, 0.1), windowMat);
-    window.position.set(wx, wy, wz);
-    group.add(window);
-    windowPositions.push(new THREE.Vector3(wx, wy, wz));
-  }
+  // left and right borders with alternating red/white stripes
+  for (let i = 0; i < stripePairs; i++) {
+    const zPos = -platformHalfSizeZ + i * stripeWidth;
+    const isFront = i % 2 === 0;
+    const mat = isFront ? redMat : whiteMat;
 
-  // left wall windows (deep inside)
-  for (let i = -1; i <= 1; i++) {
-    const wx = -(size / 2) + 1.5;
-    const wy = 1.6;
-    const wz = i * windowSpacing;
-    const window = new THREE.Mesh(new THREE.BoxGeometry(windowSize, windowSize, 0.1), windowMat);
-    window.position.set(wx, wy, wz);
-    group.add(window);
-    windowPositions.push(new THREE.Vector3(wx, wy, wz));
-  }
+    // left border
+    const leftBorder = new THREE.Mesh(new THREE.BoxGeometry(borderThickness, borderHeight, stripeWidth), mat);
+    leftBorder.position.set(-platformHalfSizeX, 0.2, zPos);
+    group.add(leftBorder);
 
-  // right wall windows (deep inside)
-  for (let i = -1; i <= 1; i++) {
-    const wx = (size / 2) - 1.5;
-    const wy = 1.6;
-    const wz = i * windowSpacing;
-    const window = new THREE.Mesh(new THREE.BoxGeometry(windowSize, windowSize, 0.1), windowMat);
-    window.position.set(wx, wy, wz);
-    group.add(window);
-    windowPositions.push(new THREE.Vector3(wx, wy, wz));
+    // right border
+    const rightBorder = new THREE.Mesh(new THREE.BoxGeometry(borderThickness, borderHeight, stripeWidth), mat);
+    rightBorder.position.set(platformHalfSizeX, 0.2, zPos);
+    group.add(rightBorder);
   }
 
   scene.add(group);
-  safehouse = { mesh: group, size, doorOpen: true, windowPositions };
+  safehouse = { mesh: group, size, doorOpen: true, windowPositions: [] };
 }
 
 function isPlayerInSafehouse(playerPos: THREE.Vector3): boolean {
   if (!safehouse) return false;
   const { size } = safehouse;
-  return Math.abs(playerPos.x) < size / 2 - 0.5 && Math.abs(playerPos.z) < size / 2 - 0.5 && playerPos.y < size;
+  // check if player is inside the platform bounds (on top of platform)
+  const platformSize = size * 1.5;
+  const isOnPlatform = Math.abs(playerPos.x) < platformSize / 2 && Math.abs(playerPos.z) < platformSize / 2 && playerPos.y > 0.2 && playerPos.y < 2.0;
+  return isOnPlatform;
 }
 
 // Event / spawn control
@@ -451,26 +456,45 @@ let spawnInterval = 1.2; // seconds
 let difficultyLevel = 0; // increases every 100 points
 let spawnFrozenUntil = 0; // timestamp while spawning is frozen (e.g., after events)
 
-// event scheduling (rare - ~5 minutes)
-// Set to `true` only during development. For normal gameplay events should be very rare (~5 minutes).
+// event scheduling (slightly more frequent - ~3-4 minutes)
+// Set to `true` only during development. For normal gameplay events should be rare (~3-4 minutes).
 const DEBUG_QUICK_EVENTS = false; // <-- set false so natural disasters are rare in normal play
 const DEBUG_EVENT_DELAY = 3000; // first event after 3s when debugging
-let nextEventAt = performance.now() + (DEBUG_QUICK_EVENTS ? DEBUG_EVENT_DELAY : 1000 * (300 + Math.random() * 60));
+let nextEventAt = performance.now() + (DEBUG_QUICK_EVENTS ? DEBUG_EVENT_DELAY : 1000 * (180 + Math.random() * 60));
 let eventWarningShown = false;
-let currentEvent: null | 'meteor' | 'lava' = null;
+let nextEventWarningAt = 0; // when to show next event warning (5 seconds before event)
+let currentEvent: null | 'meteor' | 'lava' | 'acidRain' | 'hail' | 'landslide' = null;
 let eventEndAt = 0;
+let lastPlatformLeftAt = 0; // when player left platform
+const PLATFORM_GRACE_PERIOD = 5000; // 5 seconds of zombie disengagement
 
 // meteor & lava storage
 const meteors: Array<{ mesh: THREE.Mesh; velocity: THREE.Vector3; ttl: number; size: number }> = [];
 let lavaMesh: THREE.Mesh | null = null;
 let lavaLevel = -100;
 
+// acid rain / hail / landslide storage
+const acidRainDrops: Array<{ mesh: THREE.Mesh; velocity: THREE.Vector3; ttl: number }> = [];
+const hailStones: Array<{ mesh: THREE.Mesh; velocity: THREE.Vector3; ttl: number }> = [];
+let landslideActive = false;
+let landslideTimer = 0;
+
+// giant mutant tracking (spawns ~once every 15 minutes)
+let lastGiantMutantAt = 0;
+const GIANT_MUTANT_INTERVAL = 900000; // 15 minutes in ms
+
 function spawnZombie() {
   const now = performance.now();
   if (zombies.length > 60) return;
   if (now < spawnFrozenUntil) return; // respect grace period
 
-  const isMutant = Math.random() < 0.06; // ~6% chance
+  // check for giant mutant spawn (very rare - ~once every 15 minutes)
+  if (now - lastGiantMutantAt > GIANT_MUTANT_INTERVAL && Math.random() < 0.01) {
+    lastGiantMutantAt = now;
+    spawnGiantMutant();
+  }
+
+  const isMutant = Math.random() < 0.06; // ~6% chance for regular mutants
   const geo = new THREE.BoxGeometry(1, 2, 1);
   const baseColor = isMutant ? 0x8b2d2d : new THREE.Color().setHSL(0.33 + (Math.random() - 0.5) * 0.08, 0.6, 0.35 + Math.random() * 0.05).getHex();
   const mat = new THREE.MeshStandardMaterial({ color: baseColor });
@@ -505,11 +529,54 @@ function spawnZombie() {
 
   m.position.copy(spawnPos);
   zombieGroup.add(m);
-  // base speed (mutants a bit faster and much tougher)
+  // base speed (mutants considerably slower than regular zombies)
   const base = 1.0 + Math.random() * 0.9;
-  const speed = base * (1 + difficultyLevel * 0.2) * (isMutant ? 1.15 : 1);
+  const speed = base * (1 + difficultyLevel * 0.2) * (isMutant ? 0.5 : 1); // mutants are 50% speed of regular
   const hp = isMutant ? (12 + Math.floor(Math.random() * 8) + difficultyLevel * 3) : (2 + Math.floor(Math.random() * 2) + Math.floor(difficultyLevel * 0.3));
   zombies.push({ mesh: m, speed, alive: true, hp, baseColor, mutant: isMutant });
+}
+
+function spawnGiantMutant() {
+  // spawn a massive, extremely slow mutant with reasonable health
+  const geo = new THREE.BoxGeometry(1, 2, 1);
+  const baseColor = 0x4d1a1a; // darker red
+  const mat = new THREE.MeshStandardMaterial({ color: baseColor });
+  const m = new THREE.Mesh(geo, mat);
+  
+  m.scale.set(3.5, 3.5, 3.5); // massive scale
+  (mat as THREE.MeshStandardMaterial).emissive = new THREE.Color(0x660000);
+  (mat as THREE.MeshStandardMaterial).metalness = 0.3;
+  (mat as THREE.MeshStandardMaterial).roughness = 0.7;
+
+  // spawn in distance similar to regular zombies
+  const playerPos = controls.getObject().position;
+  let spawnPos: THREE.Vector3 | null = null;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = SPAWN_MIN_DISTANCE + Math.random() * (SPAWN_MAX_DISTANCE - SPAWN_MIN_DISTANCE);
+    const x = Math.cos(a) * r;
+    const z = Math.sin(a) * r;
+    if (playerPos.distanceTo(new THREE.Vector3(x, playerPos.y, z)) < SPAWN_MIN_DISTANCE) continue;
+    if (Math.abs(x) > 190 || Math.abs(z) > 190) continue;
+    if (willCollideAt(x, z, 0, 1.0)) continue;
+    spawnPos = new THREE.Vector3(x, 1, z);
+    break;
+  }
+  if (!spawnPos) {
+    const a = Math.random() * Math.PI * 2;
+    const r = SPAWN_MIN_DISTANCE + Math.random() * 80;
+    spawnPos = new THREE.Vector3(Math.cos(a) * r, 1, Math.sin(a) * r);
+  }
+
+  m.position.copy(spawnPos);
+  zombieGroup.add(m);
+  
+  // extremely slow speed (0.3x of regular zombies)
+  const speed = 0.3 * (1 + difficultyLevel * 0.1);
+  // reasonable health for its size
+  const hp = 35 + Math.floor(Math.random() * 15) + difficultyLevel * 4;
+  const giantMutantData: any = { mesh: m, speed, alive: true, hp, baseColor, mutant: true, isGiant: true };
+  zombies.push(giantMutantData);
 }  
 
 // ---------- Shooting (raycast) ----------
@@ -613,6 +680,9 @@ function shoot() {
   // animate crosshair briefly
   crosshairEl.classList.add('small');
   setTimeout(() => crosshairEl.classList.remove('small'), 80);
+
+  // resolve any penetration that recoil may cause
+  resolvePlayerPenetration();
 } 
 
 function killZombie(mesh: THREE.Mesh) {
@@ -810,11 +880,190 @@ function scheduleNextEvent() {
     // short, repeatable interval for development/testing
     nextEventAt = now + 8000 + Math.random() * 8000; // 8-16s
   } else {
-    // rare: ~5 minutes ± 60s
-    nextEventAt = now + 1000 * (300 + Math.random() * 60);
+    // slightly more frequent: ~3-4 minutes ± 60s
+    nextEventAt = now + 1000 * (180 + Math.random() * 60);
   }
   eventWarningShown = false;
+  nextEventWarningAt = nextEventAt - 5000; // warn 5 seconds before
   currentEvent = null;
+}
+
+function showEventWarning(message: string) {
+  const eventMsg = document.getElementById('eventMsg') as HTMLElement;
+  eventMsg.textContent = message;
+  eventMsg.style.display = 'block';
+  eventMsg.style.color = '#ffaa00';
+}
+
+function showEventStarted(message: string) {
+  const eventMsg = document.getElementById('eventMsg') as HTMLElement;
+  eventMsg.textContent = message;
+  eventMsg.style.display = 'block';
+  eventMsg.style.color = '#ff3333';
+}
+
+function hideEventMsg() {
+  const eventMsg = document.getElementById('eventMsg') as HTMLElement;
+  eventMsg.style.display = 'none';
+}
+
+function startAcidRainEvent() {
+  // spawn acid rain drops from sky
+  const count = 80;
+  for (let i = 0; i < count; i++) {
+    const geom = new THREE.SphereGeometry(0.2, 6, 6);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x88ff00, emissive: 0x88ff00, transparent: true, opacity: 0.7 });
+    const mesh = new THREE.Mesh(geom, mat);
+    const x = (Math.random() - 0.5) * 300;
+    const z = (Math.random() - 0.5) * 300;
+    const y = 60 + Math.random() * 40;
+    mesh.position.set(x, y, z);
+    scene.add(mesh);
+    const vy = -(15 + Math.random() * 30);
+    acidRainDrops.push({ mesh, velocity: new THREE.Vector3(0, vy, 0), ttl: 10 });
+  }
+  showEventStarted('⚠️ ACID RAIN INCOMING! ⚠️');
+}
+
+function updateAcidRainEvent(delta: number) {
+  const player = controls.getObject();
+  const playerOnPlatform = isPlayerInSafehouse(player.position);
+  const now = performance.now();
+  const eventProgress = Math.max(0, Math.min(1, (now - (eventEndAt - 10000)) / 10000)); // 0 to 1 over 10 seconds
+
+  for (let i = acidRainDrops.length - 1; i >= 0; i--) {
+    const d = acidRainDrops[i];
+    d.mesh.position.addScaledVector(d.velocity, delta);
+    d.ttl -= delta;
+
+    // kill zombies (except in safe areas)
+    for (let j = zombies.length - 1; j >= 0; j--) {
+      const z = zombies[j];
+      if (d.mesh.position.distanceTo(z.mesh.position) < 1.2) {
+        z.alive = false;
+        zombieGroup.remove(z.mesh);
+        zombies.splice(j, 1);
+        updateScore(3);
+      }
+    }
+
+    // player damage if not on platform
+    if (!playerOnPlatform && d.mesh.position.distanceTo(player.position) < 1.5) {
+      health -= (100 * delta); // acid rain damage over 10 seconds = ~100 damage
+      healthEl.textContent = `Health: ${health}`;
+      if (health <= 0) {
+        gameOver();
+      }
+    }
+
+    if (d.ttl <= 0 || d.mesh.position.y <= -10) {
+      scene.remove(d.mesh);
+      acidRainDrops.splice(i, 1);
+    }
+  }
+
+  if (acidRainDrops.length === 0 && now >= eventEndAt) {
+    endEvent();
+  }
+}
+
+function startHailEvent() {
+  // spawn large hailstones
+  const count = 60;
+  for (let i = 0; i < count; i++) {
+    const geom = new THREE.IcosahedronGeometry(0.35, 3);
+    const mat = new THREE.MeshStandardMaterial({ color: 0xccccff, emissive: 0x6666ff, metalness: 0.3 });
+    const mesh = new THREE.Mesh(geom, mat);
+    const x = (Math.random() - 0.5) * 300;
+    const z = (Math.random() - 0.5) * 300;
+    const y = 80 + Math.random() * 60;
+    mesh.position.set(x, y, z);
+    scene.add(mesh);
+    const vy = -(30 + Math.random() * 50);
+    hailStones.push({ mesh, velocity: new THREE.Vector3(0, vy, 0), ttl: 10 });
+  }
+  showEventStarted('❄️ HAILSTORM! ❄️');
+}
+
+function updateHailEvent(delta: number) {
+  const player = controls.getObject();
+  const playerOnPlatform = isPlayerInSafehouse(player.position);
+  const now = performance.now();
+
+  for (let i = hailStones.length - 1; i >= 0; i--) {
+    const h = hailStones[i];
+    h.mesh.position.addScaledVector(h.velocity, delta);
+    h.ttl -= delta;
+
+    // kill zombies
+    for (let j = zombies.length - 1; j >= 0; j--) {
+      const z = zombies[j];
+      if (h.mesh.position.distanceTo(z.mesh.position) < 1.5) {
+        z.alive = false;
+        zombieGroup.remove(z.mesh);
+        zombies.splice(j, 1);
+        updateScore(3);
+      }
+    }
+
+    // player damage if not on platform
+    if (!playerOnPlatform && h.mesh.position.distanceTo(player.position) < 1.8) {
+      health -= (120 * delta); // hail damage over 10 seconds
+      healthEl.textContent = `Health: ${health}`;
+      if (health <= 0) {
+        gameOver();
+      }
+    }
+
+    if (h.ttl <= 0 || h.mesh.position.y <= -10) {
+      scene.remove(h.mesh);
+      hailStones.splice(i, 1);
+    }
+  }
+
+  if (hailStones.length === 0 && now >= eventEndAt) {
+    endEvent();
+  }
+}
+
+function startLandslideEvent() {
+  landslideActive = true;
+  landslideTimer = 10; // 10 seconds
+  showEventStarted('🏔️ LANDSLIDE! RUN! 🏔️');
+}
+
+function updateLandslideEvent(delta: number) {
+  const player = controls.getObject();
+  const playerOnPlatform = isPlayerInSafehouse(player.position);
+  
+  landslideTimer -= delta;
+  const progress = 1 - (landslideTimer / 10); // 0 to 1
+
+  // progressive landslide damage - ground rises and crushes everything
+  const landslideHeight = -50 + progress * 80; // rises from -50 to 30
+
+  // kill zombies as ground crushes them
+  for (let i = zombies.length - 1; i >= 0; i--) {
+    const z = zombies[i];
+    if (z.mesh.position.y <= landslideHeight + 2) {
+      z.alive = false;
+      zombieGroup.remove(z.mesh);
+      zombies.splice(i, 1);
+      updateScore(3);
+    }
+  }
+
+  // player damage if not on platform
+  if (!playerOnPlatform && player.position.y <= landslideHeight + 2) {
+    health = 0;
+    healthEl.textContent = `Health: ${health}`;
+    gameOver();
+  }
+
+  if (landslideTimer <= 0) {
+    landslideActive = false;
+    endEvent();
+  }
 }
 
 function startMeteorEvent() {
@@ -835,10 +1084,27 @@ function startMeteorEvent() {
     const vy = - (20 + Math.random() * 40);
     meteors.push({ mesh, velocity: new THREE.Vector3(vx, vy, vz), ttl: 8.0, size });
   }
+  showEventStarted('☄️ METEOR SHOWER! ☄️');
+}
+
+function startLavaEvent() {
+  // create a lava mesh that will rise from below
+  if (lavaMesh) scene.remove(lavaMesh);
+  const geom = new THREE.PlaneGeometry(500, 500);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xcc4400, emissive: 0xff6600, metalness: 0.2, roughness: 0.4 });
+  lavaMesh = new THREE.Mesh(geom, mat);
+  lavaMesh.rotation.x = -Math.PI / 2;
+  lavaMesh.position.y = -50;
+  scene.add(lavaMesh);
+  (lavaMesh.userData as any).targetY = 15; // rises to this level
+  lavaLevel = -50;
+  showEventStarted('🔥 LAVA ERUPTION! 🔥');
 }
 
 function updateMeteorEvent(delta: number) {
   const player = controls.getObject();
+  const playerOnPlatform = isPlayerInSafehouse(player.position);
+  
   for (let i = meteors.length - 1; i >= 0; i--) {
     const m = meteors[i];
     m.mesh.position.addScaledVector(m.velocity, delta);
@@ -855,11 +1121,10 @@ function updateMeteorEvent(delta: number) {
         updateScore(5);
       }
     }
-    if (player.position.distanceTo(m.mesh.position) < (m.size + 0.9)) {
+    if (!playerOnPlatform && player.position.distanceTo(m.mesh.position) < (m.size + 0.9)) {
       health = 0;
       healthEl.textContent = `Health: ${health}`;
       gameOver();
-      // remove meteor on player-hit
       scene.remove(m.mesh);
       meteors.splice(i, 1);
       continue;
@@ -877,7 +1142,7 @@ function updateMeteorEvent(delta: number) {
           updateScore(5);
         }
       }
-      if (player.position.distanceTo(pos) < 2.0) {
+      if (!playerOnPlatform && player.position.distanceTo(pos) < 2.0) {
         health = 0;
         healthEl.textContent = `Health: ${health}`;
         gameOver();
@@ -893,24 +1158,12 @@ function updateMeteorEvent(delta: number) {
   }
 }
 
-function startLavaEvent() {
-  // create lava plane and start rising
-  const geom = new THREE.PlaneGeometry(1000, 1000);
-  const mat = new THREE.MeshStandardMaterial({ color: 0xff4a33, emissive: 0xff5533, transparent: true, opacity: 0.85 });
-  lavaMesh = new THREE.Mesh(geom, mat);
-  lavaMesh.rotation.x = -Math.PI / 2;
-  lavaMesh.position.set(0, -50, 0);
-  scene.add(lavaMesh);
-  lavaLevel = -50;
-  // target is the maximum car top (if any) else 0.9
-  const carTops = obstacles.filter(o => o.isCar).map(o => o.top);
-  const maxCarTop = carTops.length ? Math.max(...carTops) : 1.0;
-  (lavaMesh.userData as any).targetY = Math.max(maxCarTop - 0.05, 0.9);
-}
-
 function updateLavaEvent(delta: number) {
   if (!lavaMesh) return;
   const targetY = (lavaMesh.userData as any).targetY as number;
+  const player = controls.getObject();
+  const playerOnPlatform = isPlayerInSafehouse(player.position);
+  
   // rise speed
   lavaLevel = THREE.MathUtils.lerp(lavaLevel, targetY, Math.min(1, delta * 0.35 * 10));
   lavaMesh.position.y = lavaLevel;
@@ -926,10 +1179,9 @@ function updateLavaEvent(delta: number) {
     }
   }
 
-  // player touch check (feet)
-  const player = controls.getObject();
+  // player touch check (feet) - only if not on platform
   const feetY = player.position.y - PLAYER_EYE_HEIGHT;
-  if (feetY <= lavaLevel + 0.15) {
+  if (!playerOnPlatform && feetY <= lavaLevel + 0.15) {
     health = 0;
     healthEl.textContent = `Health: ${health}`;
     gameOver();
@@ -942,20 +1194,29 @@ function updateLavaEvent(delta: number) {
 }
 
 function endEvent() {
-  // clear meteors
+  // clear all event elements
   meteors.forEach(m => scene.remove(m.mesh));
   meteors.length = 0;
-  // remove lava
+  
+  acidRainDrops.forEach(d => scene.remove(d.mesh));
+  acidRainDrops.length = 0;
+  
+  hailStones.forEach(h => scene.remove(h.mesh));
+  hailStones.length = 0;
+  
   if (lavaMesh) scene.remove(lavaMesh);
   lavaMesh = null;
   lavaLevel = -100;
+  
+  landslideActive = false;
+  landslideTimer = 0;
 
   // set 5s grace period for spawns
   spawnFrozenUntil = performance.now() + 5000;
   // schedule next event
   scheduleNextEvent();
   currentEvent = null;
-  (document.getElementById('eventMsg') as HTMLElement).style.display = 'none';
+  hideEventMsg();
 }
 
 // ---------- Game loop ----------
@@ -980,24 +1241,46 @@ function animate() {
 
   // start event if it's time
   if (!currentEvent && time >= nextEventAt) {
-    // pick event
-    currentEvent = Math.random() < 0.5 ? 'meteor' : 'lava';
-    eventEndAt = time + 10000; // events last ~10s active phase (meteors rain / lava rise)
+    // pick random event from all 5 types
+    const eventTypes = ['meteor', 'lava', 'acidRain', 'hail', 'landslide'];
+    currentEvent = eventTypes[Math.floor(Math.random() * eventTypes.length)] as any;
+    eventEndAt = time + 10000; // events last ~10s active phase
     eventWarningShown = false;
     // freeze zombie spawning for the duration + a 5s grace period after
     spawnFrozenUntil = eventEndAt + 5000;
 
-    (document.getElementById('eventMsg') as HTMLElement).textContent = `${currentEvent === 'meteor' ? 'Meteor shower' : 'Lava eruption'} — active!`;
-    (document.getElementById('eventMsg') as HTMLElement).classList.remove('warn');
-    (document.getElementById('eventMsg') as HTMLElement).style.display = 'block';
+    const eventNames: any = {
+      meteor: 'Meteor shower',
+      lava: 'Lava eruption',
+      acidRain: 'Acid rain',
+      hail: 'Hailstorm',
+      landslide: 'Landslide'
+    };
+
+    if (currentEvent) {
+      (document.getElementById('eventMsg') as HTMLElement).textContent = `${eventNames[currentEvent]} — active!`;
+      (document.getElementById('eventMsg') as HTMLElement).classList.remove('warn');
+      (document.getElementById('eventMsg') as HTMLElement).style.display = 'block';
+    }
 
     if (currentEvent === 'meteor') startMeteorEvent();
-    else startLavaEvent();
+    else if (currentEvent === 'lava') startLavaEvent();
+    else if (currentEvent === 'acidRain') startAcidRainEvent();
+    else if (currentEvent === 'hail') startHailEvent();
+    else if (currentEvent === 'landslide') startLandslideEvent();
   }
 
   // handle active event updates
   if (currentEvent === 'meteor') updateMeteorEvent(delta);
-  if (currentEvent === 'lava') updateLavaEvent(delta);
+  else if (currentEvent === 'lava') updateLavaEvent(delta);
+  else if (currentEvent === 'acidRain') updateAcidRainEvent(delta);
+  else if (currentEvent === 'hail') updateHailEvent(delta);
+  else if (currentEvent === 'landslide') updateLandslideEvent(delta);
+
+  // check if event should end
+  if (currentEvent && time >= eventEndAt) {
+    endEvent();
+  }
 
   // passive score: +5 points per second
   updateScore(5 * delta);
@@ -1036,14 +1319,14 @@ function animate() {
     p.ttl -= delta;
     let hit = false;
     if (p.target) {
-      if (p.target.parent && p.mesh.position.distanceTo(p.target.position) < 1.0) {
+      if (p.target.parent && p.mesh.position.distanceTo(p.target.position) < 1.5) {
         damageZombie(p.target, 1);
         hit = true;
       }
     } else {
       for (const z of zombies) {
         if (!z.alive) continue;
-        if (p.mesh.position.distanceTo(z.mesh.position) < 0.9) {
+        if (p.mesh.position.distanceTo(z.mesh.position) < 1.5) {
           damageZombie(z.mesh, 1);
           hit = true;
           break;
@@ -1150,7 +1433,7 @@ function animate() {
 
   // ----- vertical (jump + gravity) -----
   // determine the highest surface under the player using both raycast *and* obstacle boxes
-  const raySurface = getSurfaceBelow(playerObj.position, 3);
+  const raySurface = getSurfaceBelow(playerObj.position, 4);
   const rayY = raySurface ? raySurface.point.y : -Infinity;
   const boxY = getHighestSurfaceYAt(playerObj.position.x, playerObj.position.z);
   const surfaceY = Math.max(rayY, boxY);
@@ -1158,10 +1441,11 @@ function animate() {
   const clientFeetY = playerObj.position.y - PLAYER_EYE_HEIGHT;
 
   // if player's feet are near or below the detected surface, snap to it (handles stepping back up reliably)
-  const SNAP_THRESHOLD = 0.22; // tolerate small gaps when stepping up
+  const SNAP_THRESHOLD = 0.5; // increased tolerance for ground detection
   if (surfaceY !== -Infinity && clientFeetY <= surfaceY + SNAP_THRESHOLD) {
     onGround = true;
-    velocityY = Math.max(0, velocityY);
+    // only kill downward velocity when landing, not when we're stepping up
+    if (velocityY < 0) velocityY = 0;
     playerObj.position.y = surfaceY + PLAYER_EYE_HEIGHT;
   } else {
     onGround = false;
@@ -1174,30 +1458,23 @@ function animate() {
   wasOnGround = onGround; 
 
   // allow jump if on ground or *very close* to a surface (helps responsiveness when stepping/jumping)
-  if (move.jump && (onGround || (raySurface && raySurface.distance <= 0.18))) {
+  if (move.jump && onGround) {
     // normal jump impulse
     velocityY = JUMP_SPEED;
     onGround = false;
     cameraBump = 0.12; // small lift on jump
 
-    // immediate vault attempt: if there's a climbable obstacle just ahead and within vault reach,
-    // snap up onto it so jumping onto car roofs is reliable even on low-frame/TCP input.
+    // auto-jump: if there's a small obstacle ahead, automatically vault over it (auto-climb onto platform)
     const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(controls.getObject().quaternion).setY(0).normalize();
-    const probe = controls.getObject().position.clone().addScaledVector(forward, 0.9);
-    const obstacleAhead = getObstacleAt(probe.x, probe.z, PLAYER_RADIUS + 0.4);
+    const probe = controls.getObject().position.clone().addScaledVector(forward, 1.2);
+    const obstacleAhead = getObstacleAt(probe.x, probe.z, PLAYER_RADIUS + 0.5);
     if (obstacleAhead) {
       const feetY = controls.getObject().position.y - PLAYER_EYE_HEIGHT;
-      const vaultReach = 1.6; // slightly more forgiving vault reach for immediate snap
-      if (obstacleAhead.top <= feetY + vaultReach) {
-        // place player cleanly on top and cancel upward jitter
-        controls.getObject().position.y = obstacleAhead.top + PLAYER_EYE_HEIGHT + 0.02;
-        velocityY = 0.8; // small upward remainder for natural arc
-        onGround = true;
-        // ensure we don't immediately fall through or get stuck
-        resolvePlayerPenetration();
-        stabilizePlayerPosition();
-        // short visual feedback
-        cameraBump = -0.06;
+      const autoJumpReach = 1.8; // can auto-jump onto objects up to this height
+      if (obstacleAhead.top <= feetY + autoJumpReach && obstacleAhead.top > feetY + 0.1) {
+        // extra upward boost for auto-jump to ensure we clear the obstacle
+        velocityY = Math.max(velocityY, 15);
+        cameraBump = 0.08;
       }
     }
   }
@@ -1233,61 +1510,98 @@ function animate() {
 
   // ----- zombies update (movement + collisions + attacks) -----
   const playerPos = playerObj.position.clone();
-  const playerInSafehouse = safehouse ? isPlayerInSafehouse(playerPos) : false;
+
+  // track when player leaves the platform (start grace period)
+  const playerCurrentlyOnPlatform = isPlayerInSafehouse(playerPos);
+  let playerJustLeftPlatform = false;
+  if (wasPlayerOnPlatform && !playerCurrentlyOnPlatform) {
+    playerJustLeftPlatform = true;
+    lastPlatformLeftAt = performance.now();
+    // apply grace period to all current zombies
+    for (const z of zombies) {
+      z.graceUntil = performance.now() + PLATFORM_GRACE_PERIOD;
+    }
+  }
+  wasPlayerOnPlatform = playerCurrentlyOnPlatform;
 
   for (let i = zombies.length - 1; i >= 0; i--) {
     const z = zombies[i];
     if (!z.alive) continue;
     const pos = z.mesh.position;
 
-    // determine target: player always prioritized, but safehouse also targeted if player inside
+    // check if zombie is in grace period (acts normal, not aggressive)
+    const inGracePeriod = z.graceUntil && performance.now() < z.graceUntil;
+    
     let target = playerPos.clone();
     let targetDist = playerPos.distanceTo(pos);
-    let targetType: 'player' | 'safehouse' = 'player';
-
-    // only attract to safehouse if player is inside it (not just existing)
-    if (playerInSafehouse && safehouse) {
-      const safehouseTarget = safehouse.mesh.position.clone();
-      const safehouseDist = safehouseTarget.distanceTo(pos);
-      const keepoutDistance = safehouse.size * 0.7; // stay back at reasonable distance
+    
+    if (inGracePeriod) {
+      // during grace period: move randomly, don't target player
+      if (!z.randomWalkDir) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 0.5 + Math.random() * 0.5;
+        z.randomWalkDir = new THREE.Vector3(
+          Math.cos(angle) * speed,
+          0,
+          Math.sin(angle) * speed
+        );
+        z.randomWalkTimeout = 2 + Math.random() * 3; // walk in this direction for 2-5 seconds
+      }
       
-      // if closer than keepout zone, zombies stop moving toward it
-      if (safehouseDist > keepoutDistance) {
-        // still outside keepout: move toward safehouse
-        target = safehouseTarget;
-        targetDist = safehouseDist;
-        targetType = 'safehouse';
-      } else {
-        // inside keepout zone: stay still (stop attacking/moving)
-        targetDist = 0;
-        targetType = 'safehouse';
+      if (z.randomWalkTimeout !== undefined) {
+        z.randomWalkTimeout -= delta;
+        if (z.randomWalkTimeout <= 0) {
+          // pick new random direction
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 0.5 + Math.random() * 0.5;
+          if (z.randomWalkDir) {
+            z.randomWalkDir.set(Math.cos(angle) * speed, 0, Math.sin(angle) * speed);
+          }
+          z.randomWalkTimeout = 2 + Math.random() * 3;
+        }
+      }
+      
+      const desiredZPos = pos.clone().addScaledVector(z.randomWalkDir!, z.speed * delta * 0.7);
+      if (!willCollideAt(desiredZPos.x, pos.z, 0, 0.5)) pos.x = desiredZPos.x;
+      if (!willCollideAt(pos.x, desiredZPos.z, 0, 0.5)) pos.z = desiredZPos.z;
+      
+      // look in direction of movement (not at player)
+      const lookDir = z.randomWalkDir!.clone().normalize();
+      z.mesh.lookAt(
+        pos.x + lookDir.x,
+        z.mesh.position.y,
+        pos.z + lookDir.z
+      );
+    } else {
+      // normal: target player aggressively
+      const dir = new THREE.Vector3(target.x - pos.x, 0, target.z - pos.z);
+      if (dir.length() > 0.001) dir.normalize();
+
+      // attempt movement with collision blocking including platform blocking
+      const desiredZPos = pos.clone().addScaledVector(dir, z.speed * delta * 2);
+      // per-axis check for zombie (foot at y=0)
+      if (!willCollideAt(desiredZPos.x, pos.z, 0, 0.5)) pos.x = desiredZPos.x;
+      if (!willCollideAt(pos.x, desiredZPos.z, 0, 0.5)) pos.z = desiredZPos.z;
+      
+      z.mesh.lookAt(target.x, z.mesh.position.y, target.z);
+    }
+    
+    // prevent zombies from going on the platform by checking if they're on it and pushing them off
+    if (safehouse) {
+      const platformSize = safehouse.size * 1.5;
+      if (Math.abs(pos.x) < platformSize / 2 && Math.abs(pos.z) < platformSize / 2 && pos.y > 0.2) {
+        // zombie is on platform - push them off
+        let centerDist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
+        if (centerDist < 0.1) centerDist = 0.1;
+        const pushOut = platformSize / 2 + 1;
+        const angle = Math.atan2(pos.z, pos.x);
+        pos.x = Math.cos(angle) * pushOut;
+        pos.z = Math.sin(angle) * pushOut;
       }
     }
 
-    const dir = new THREE.Vector3(target.x - pos.x, 0, target.z - pos.z);
-    if (dir.length() > 0.001) dir.normalize();
-
-    // slowdown near safehouse only when player is inside
-    let speedMult = 1.0;
-    if (playerInSafehouse && targetType === 'safehouse' && safehouse) {
-      const distToSafehouse = safehouse.mesh.position.distanceTo(pos);
-      const slowdownRange = safehouse.size * 1.5;
-      if (distToSafehouse < slowdownRange) {
-        // approach slowly, exponential slowdown
-        speedMult = Math.max(0.05, Math.pow(distToSafehouse / slowdownRange, 2));
-      }
-    }
-
-    // attempt movement with collision blocking
-    const desiredZPos = pos.clone().addScaledVector(dir, z.speed * speedMult * delta * 2);
-    // per-axis check for zombie (foot at y=0)
-    if (!willCollideAt(desiredZPos.x, pos.z, 0, 0.5)) pos.x = desiredZPos.x;
-    if (!willCollideAt(pos.x, desiredZPos.z, 0, 0.5)) pos.z = desiredZPos.z;
-
-    z.mesh.lookAt(target.x, z.mesh.position.y, target.z);
-
-    // attack only if targeting player and close enough
-    if (targetType === 'player' && targetDist < 1.6) {
+    // attack only if close enough (and not in grace period, grace zombies won't attack)
+    if (!inGracePeriod && targetDist < 1.6) {
       let dmg = 12 + difficultyLevel * 6;
       if ((z as any).mutant) dmg = Math.floor(dmg * 2.2);
       health -= dmg;
@@ -1308,16 +1622,6 @@ function animate() {
       if (health <= 0) {
         gameOver();
       }
-    }
-
-    // prevent zombies from entering safehouse
-    if (safehouse && isPlayerInSafehouse(playerPos) !== isPlayerInSafehouse(pos)) {
-      let centerDist = new THREE.Vector3(pos.x, 0, pos.z).length();
-      if (centerDist < 0.1) centerDist = 0.1;
-      const pushOut = safehouse.size + 1;
-      const angle = Math.atan2(pos.z, pos.x);
-      pos.x = Math.cos(angle) * pushOut;
-      pos.z = Math.sin(angle) * pushOut;
     }
   }
 
