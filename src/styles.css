@@ -6,3 +6,16 @@ canvas { display: block; }
 #overlay.hidden { display: none; }
 #startBtn { padding: 10px 18px; border-radius: 8px; border: none; background: #1f8cff; color: white; font-weight: 700; cursor: pointer; }
 #instructions { opacity: 0.9; font-size: 13px; color: #ddd; }
+
+/* Crosshair + aim dot */
+#crosshair { display: none; position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 28px; height: 28px; pointer-events: none; z-index: 11; mix-blend-mode: screen; }
+#crosshair::before, #crosshair::after { content: ''; position: absolute; left: 50%; top: 50%; width: 22px; height: 2px; background: rgba(255,255,255,0.85); transform-origin: center; }
+#crosshair::before { transform: translate(-50%, -50%) rotate(0deg); }
+#crosshair::after { transform: translate(-50%, -50%) rotate(90deg); }
+#crosshair.small { transform: translate(-50%, -50%) scale(0.88); opacity: 0.9; }
+
+#aimDot { position: fixed; width: 10px; height: 10px; border-radius: 50%; background: rgba(255,238,153,0.95); box-shadow: 0 0 8px rgba(255,238,153,0.8); pointer-events: none; z-index: 11; transform: translate(-50%, -50%); display: none; }
+#aimDot.enemy { background: rgba(255,120,120,0.95); box-shadow: 0 0 10px rgba(255,80,80,0.9); }
+
+#eventMsg { position: fixed; left: 50%; top: 8%; transform: translateX(-50%); padding: 10px 14px; background: rgba(20,20,20,0.85); color: #ffdca3; border-radius: 8px; z-index: 12; font-weight: 700; display: none; box-shadow: 0 6px 20px rgba(0,0,0,0.6); }
+#eventMsg.warn { background: rgba(80,20,20,0.95); color: #ffdddd; }
