@@ -1,26 +1,18 @@
-# FPS Zombie (TypeScript + three.js)
+Typescript isnt meant to be a game engine, but i like it because it can run straight away online. It uses vite, so it uses local host 5173 is you run this locally, however youll need to install the npm package before doing so.
 
-A small 3D first-person shooter demo written in TypeScript using **three.js** and **Vite**.
 
-Features
-- First-person controls (Pointer Lock + WASD)
-- Randomly spawning zombies that path toward the player
-- Shoot zombies (left click at center) to earn points
-- Simple sandbox environment with obstacles
+HOW TO PLAY
 
-Run locally
-1. Install dependencies: `npm install`
-2. Start dev server: `npm run dev`
-3. Open the URL printed by Vite (usually `http://localhost:5173`)
+It uses WASD to move around, and you use the mouse to look around. Left click to shoot. Its a pretty simple game to say the least.
 
-Controls
-- Click the big button / click in the canvas to lock the pointer
-- WASD to move, mouse to look
-- Left click to shoot (center crosshair)
-- Esc to unlock pointer
+The score increases as time goes by, and the player and zombies progressively increase in physical capabilities. Random events occur throughout the game, and the only place where your 100% safe is the safe platform, which spawns at the center of the map after reaching 1000 points, which even saves you from zombies.
 
-Notes
-- Uses procedural geometry (no external assets)
-- Designed as a compact demo — extend as you like (AI, sounds, bullets, levels)
 
-Enjoy! 🎯
+ISSUES
+
+There are a couple of bugs and things id like to improve, for instance, the jump function doesnt seem to actually work well. Zombies are also just green cuboids, whereas super-zombies are big red cuboids. If assets are used for zombies, i fear the game would run awfully, and hence i havent attempted to do that. Recoil from shooting also pushes you backwards into buildings, which is also something i attempted to fix (and was unsuccessful).
+
+
+CLOSING NOTES
+
+Any changes to this is welcome, just ask for permission for contribution, and ensure you make your own seperate branches from dev.
